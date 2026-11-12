@@ -383,10 +383,16 @@ pfcp::pdi smf_session_procedure::pfcp_build_pdi(
     if (pfcp_ethernet_packet_filter(edge, ethernet_packet_filter)) {
       pdi.set(ethernet_packet_filter);
     }
-  }
-
-  if (pfcp_sdf_filter(edge, sdf_filter)) {
-    pdi.set(sdf_filter);
+  } else {
+    // An IP SDF filter is only meaningful for an IP PDU session. In an
+    // Ethernet session the default flow description
+    // ("permit out ip from any to assigned") can never match, because no UE IP
+    // address is assigned; an inner IP filter belongs inside the Ethernet
+    // Packet Filter, which pfcp_ethernet_packet_filter() builds itself via
+    // pfcp_sdf_filter(edge, sdf_filter, true).
+    if (pfcp_sdf_filter(edge, sdf_filter)) {
+      pdi.set(sdf_filter);
+    }
   }
 
   pdi.set(source_interface_type);
@@ -832,6 +838,14 @@ bool smf_session_procedure::pfcp_ethernet_packet_filter(
     const std::shared_ptr<qos_upf_edge>& edge,
     ethernet_packet_filter& ethernet_packet_filter) {
   if (!edge->flow_information.ethFlowDescriptionIsSet()) {
+    // No ethFlowDescription was provisioned, so provision no Ethernet Packet
+    // Filter at all. The IE is optional in the PDI (TS 29.244 V19.6.0
+    // table 7.5.2.2-2) and its sub-IEs offer no wildcard encoding
+    // (table 7.5.2.2-3), so "match any Ethernet frame" is expressed by the
+    // filter's absence: the PDI then matches on the source interface and the
+    // Local F-TEID / Ethernet PDU Session Information alone (clause 5.2.1A.1).
+    // An empty filter is not a match-all - it is a zero-length IE 132 carrying
+    // no detection information, which a UPF is entitled to reject.
     Logger::smf_app().warn("No Ethernet Flow Description found!");
     return false;
   }
@@ -900,11 +914,16 @@ bool smf_session_procedure::pfcp_ethernet_packet_filter(
       ethernet_packet_filter.set(mac_address);
     }
 
-    // EtherType
-    ethertype_t ethertype = {};
-    oai::utils::xgpp_conv::ethType_to_pcfp_ethertype(
-        ethFlowDescription.getEthType(), ethertype);
-    ethernet_packet_filter.set(ethertype);
+    // EtherType. Optional per TS 29.244 table 7.5.2.2-3: omitting the IE
+    // matches any Ethertype. ethType_to_pcfp_ethertype() rejects anything that is not a
+    // 4-digit hex string and returns without writing, so setting the IE
+    // unconditionally emitted an Ethertype of 0x0000, which matches nothing.
+    if (!ethFlowDescription.getEthType().empty()) {
+      ethertype_t ethertype = {};
+      oai::utils::xgpp_conv::ethType_to_pcfp_ethertype(
+          ethFlowDescription.getEthType(), ethertype);
+      ethernet_packet_filter.set(ethertype);
+    }
 
     // C-TAG and V-TAG
     if (ethFlowDescription.vlanTagsIsSet()) {
